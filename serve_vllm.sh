@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage:
+#   bash serve_vllm.sh llama31 Random 01
+#   bash serve_vllm.sh qwen3   Kmeans 01
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+MODEL_KIND="${1:-llama31}"
+DATA_KIND="${2:-Random}"
+ID="${3:-01}"
+
+if [[ "$ID" =~ ^[0-9]+$ ]]; then
+    ID=$(printf '%02d' "$((10#$ID))")
+else
+    echo "ID must be an integer from 01 to 12: $ID" >&2
+    exit 2
+fi
+
+MODEL_ROOT="${MODEL_ROOT:-/share/project/wuhaiming/data/models}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+TP_SIZE="${TP_SIZE:-4}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-8002}"
+
+case "$DATA_KIND" in
+    Kmeans|kmeans) DATA_KIND="Kmeans" ;;
+    Random|random) DATA_KIND="Random" ;;
+    *)
+        echo "Unsupported data kind: $DATA_KIND; use Kmeans or Random." >&2
+        exit 2
+        ;;
+esac
+
+case "$MODEL_KIND" in
+    llama31|llama)
+        MODEL_KIND="llama31"
+        MODEL_PATH="${MODEL_ROOT}/LLama-3.1-8B-SFT-${DATA_KIND}-${ID}"
+        SERVED_MODEL_NAME="llama-3.1-8b-${DATA_KIND,,}-${ID}"
+        ;;
+    qwen3|qwen)
+        MODEL_KIND="qwen3"
+        MODEL_PATH="${MODEL_ROOT}/Qwen3-8B-Base-SFT-${DATA_KIND}-${ID}"
+        SERVED_MODEL_NAME="qwen3-8b-${DATA_KIND,,}-${ID}"
+        ;;
+    *)
+        echo "Unsupported model kind: $MODEL_KIND; use llama31 or qwen3." >&2
+        exit 2
+        ;;
+esac
+
+if [[ ! -d "$MODEL_PATH" ]]; then
+    echo "Merged model directory does not exist: $MODEL_PATH" >&2
+    exit 1
+fi
+
+# Llama Base tokenizers often have no chat_template. Use the bundled Llama3
+# template unless the caller explicitly provides another one.
+if [[ "$MODEL_KIND" == "llama31" && -z "${CHAT_TEMPLATE:-}" ]]; then
+    BUNDLED_CHAT_TEMPLATE="${SCRIPT_DIR}/llama3_chat_template.jinja"
+    if [[ -f "$BUNDLED_CHAT_TEMPLATE" ]]; then
+        CHAT_TEMPLATE="$BUNDLED_CHAT_TEMPLATE"
+    fi
+fi
+
+# Chat Completions requires a valid chat template. Do not silently deploy a
+# merged Base directory with a missing or malformed tokenizer template.
+if [[ -z "${CHAT_TEMPLATE:-}" && "${CHECK_CHAT_TEMPLATE:-1}" == "1" ]]; then
+    if ! "$PYTHON_BIN" - "$MODEL_PATH" <<'PY'
+import sys
+from transformers import AutoTokenizer
+
+model_path = sys.argv[1]
+tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+if not tokenizer.chat_template:
+    raise SystemExit("tokenizer.chat_template is empty")
+print("chat_template: ok")
+print(f"eos_token_id: {tokenizer.eos_token_id}")
+PY
+    then
+        echo "No usable chat_template found in: $MODEL_PATH" >&2
+        echo "Either fix the merged tokenizer files or set:" >&2
+        echo "  CHAT_TEMPLATE=/absolute/path/to/template.jinja bash serve_vllm.sh ..." >&2
+        exit 1
+    fi
+fi
+
+VLLM_ARGS=(
+    "$MODEL_PATH"
+    --served-model-name "$SERVED_MODEL_NAME"
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"
+    --tensor-parallel-size "$TP_SIZE"
+    --dtype auto
+    --max-model-len "$MAX_MODEL_LEN"
+    --generation-config vllm
+    --disable-log-stats
+    --host "$HOST"
+    --port "$PORT"
+)
+
+# Qwen3 enables thinking by default in its chat template. Disable it at the
+# server level so thinking behavior is deterministic across requests.
+if [[ "$MODEL_KIND" == "qwen3" ]]; then
+    VLLM_ARGS+=(--default-chat-template-kwargs '{"enable_thinking": false}')
+fi
+
+# If the merged tokenizer has no chat_template, provide a Jinja file explicitly:
+#   CHAT_TEMPLATE=/path/to/chat_template.jinja bash serve_vllm.sh ...
+if [[ -n "${CHAT_TEMPLATE:-}" ]]; then
+    VLLM_ARGS+=(--chat-template "$CHAT_TEMPLATE")
+fi
+
+echo "Model path              : $MODEL_PATH"
+echo "Served model name       : $SERVED_MODEL_NAME"
+echo "CUDA_VISIBLE_DEVICES    : $CUDA_DEVICES"
+echo "Tensor parallel size    : $TP_SIZE"
+echo "Port                    : $PORT"
+echo "Max model length        : $MAX_MODEL_LEN"
+
+exec env CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" vllm serve "${VLLM_ARGS[@]}"

@@ -1,0 +1,24 @@
+{# Match ms-swift's llama3_2 template used during SFT. #}
+{%- if date_string is not defined -%}
+    {%- set date_string = strftime_now('%d %b %Y') -%}
+{%- endif -%}
+{%- if messages and messages[0]['role'] == 'system' -%}
+    {%- set system_message = messages[0]['content'] | trim -%}
+    {%- set loop_messages = messages[1:] -%}
+{%- else -%}
+    {%- set system_message = '' -%}
+    {%- set loop_messages = messages -%}
+{%- endif -%}
+{{- bos_token -}}
+{{- '<|start_header_id|>system<|end_header_id|>\n\n' -}}
+{{- 'Cutting Knowledge Date: December 2023\nToday Date: ' + date_string + '\n\n' -}}
+{{- system_message -}}
+{{- '<|eot_id|>' -}}
+{%- for message in loop_messages -%}
+    {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' -}}
+    {{- message['content'] | trim -}}
+    {{- '<|eot_id|>' -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' -}}
+{%- endif -%}

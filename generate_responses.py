@@ -29,8 +29,10 @@ def generate_response(
     prompt: str,
     temperature: float,
     max_tokens: int,
+    repetition_penalty: float,
     api_key: str | None,
     seed: int | None,
+    stop_token_ids: list[int] | None,
 ) -> str:
     """Generate a response from the API."""
     headers = {"Content-Type": "application/json"}
@@ -42,9 +44,12 @@ def generate_response(
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "repetition_penalty": repetition_penalty,
     }
     if seed is not None:
         payload["seed"] = seed
+    if stop_token_ids:
+        payload["stop_token_ids"] = stop_token_ids
 
     response = client.post(
         f"{api_base.rstrip('/')}/chat/completions",
@@ -96,6 +101,12 @@ def main():
         help="Maximum tokens to generate",
     )
     parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=1.0,
+        help="vLLM repetition penalty; 1.0 disables the penalty",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=settings.seed,
@@ -105,6 +116,11 @@ def main():
         "--api-key",
         default=settings.api_key,
         help="API key (if required)",
+    )
+    parser.add_argument(
+        "--stop-token-ids",
+        default="",
+        help="Comma-separated vLLM stop token IDs",
     )
     parser.add_argument(
         "--workers",
@@ -125,6 +141,15 @@ def main():
         parser.error("--model is required (or set MODEL in .env)")
     if not args.api_base:
         parser.error("--api-base is required (or set API_BASE in .env)")
+
+    try:
+        stop_token_ids = [
+            int(token_id.strip())
+            for token_id in args.stop_token_ids.split(",")
+            if token_id.strip()
+        ]
+    except ValueError:
+        parser.error("--stop-token-ids must be comma-separated integers")
 
     prompts = load_prompts(args.input_file)
     print(f"Loaded {len(prompts)} prompts from {args.input_file}")
@@ -166,8 +191,10 @@ def main():
                     p["prompt"],
                     args.temperature,
                     args.max_tokens,
+                    args.repetition_penalty,
                     args.api_key,
                     args.seed,
+                    stop_token_ids,
                 ): p
                 for p in remaining
             }
@@ -186,7 +213,7 @@ def main():
                             "key": prompt_data["key"],
                             "error": str(e),
                         })
-                        # Add empty response so eval can still run
+                        # Keep a placeholder so the partial output is inspectable; evaluation will fail below
                         results.append({
                             "prompt": prompt_data["prompt"],
                             "response": "",
@@ -209,6 +236,7 @@ def main():
         print(f"Errors: {len(errors)}")
         for e in errors[:5]:
             print(f"  - Key {e['key']}: {e['error']}")
+        raise SystemExit(1)
 
     print(f"\nRun evaluation with:")
     print(f"  uv run python3 -m run_eval --input_data={args.input_file} --input_response_data={args.output_file} --output_dir=eval")
