@@ -15,6 +15,7 @@
 
 """Binary of evaluating instruction following. See README.md."""
 
+import json
 import os
 
 from absl import app
@@ -48,12 +49,25 @@ def main(argv):
   prompt_to_response = evaluation_lib.read_prompt_to_response_dict(
       _INPUT_RESPONSE_DATA.value)
 
+  input_basename = os.path.basename(_INPUT_RESPONSE_DATA.value)
+  if "-responses.jsonl" in input_basename:
+      model_name = input_basename.replace("-responses.jsonl", "")
+  else:
+      model_name = os.path.splitext(input_basename)[0]
+
+  score_results = {
+      "model_name": model_name,
+      "input_data": _INPUT_DATA.value,
+      "input_response_data": _INPUT_RESPONSE_DATA.value,
+      "num_examples": len(inputs),
+  }
+
   # get instruction following results
-  for func, output_file_name in [
+  for func, result_name in [
       (evaluation_lib.test_instruction_following_strict, "eval_results_strict"),
       (evaluation_lib.test_instruction_following_loose, "eval_results_loose"),
   ]:
-    logging.info("Generating %s...", output_file_name)
+    logging.info("Generating %s...", result_name)
     outputs = []
     for inp in inputs:
       outputs.append(func(inp, prompt_to_response))
@@ -61,13 +75,7 @@ def main(argv):
     accuracy = sum(follow_all_instructions) / len(outputs)
     logging.info("Accuracy: %f", accuracy)
 
-    input_basename = os.path.basename(_INPUT_RESPONSE_DATA.value)
-    if "-responses.jsonl" in input_basename:
-        model_name = input_basename.replace("-responses.jsonl", "")
-    else:
-         model_name = os.path.splitext(input_basename)[0]
-    
-    output_filename = f"{model_name}-{output_file_name}.jsonl"
+    output_filename = f"{model_name}-{result_name}.jsonl"
     
     output_file_name = os.path.join(
         _OUTPUT_DIR.value, output_filename
@@ -79,6 +87,18 @@ def main(argv):
     print("=" * 64)
     print(f"{output_file_name} Accuracy Scores:")
     evaluation_lib.print_report(outputs)
+    score_results[result_name.replace("eval_results_", "")] = (
+        evaluation_lib.get_report(outputs)
+    )
+
+  score_filename = os.path.join(
+      _OUTPUT_DIR.value, f"{model_name}-eval_scores.json"
+  )
+  with open(score_filename, "w", encoding="utf-8") as f:
+    json.dump(score_results, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+  logging.info("Generated score summary: %s", score_filename)
+  print(f"Saved score summary: {score_filename}")
 
 
 if __name__ == "__main__":

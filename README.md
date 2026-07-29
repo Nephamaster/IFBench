@@ -74,3 +74,52 @@ If you used this repository or our models, please cite our work:
   volume={38},
   year={2025}
 }
+```
+
+## Local vLLM inference for Qwen3 and Llama-3.1
+
+The repository includes `serve_vllm.sh`, `inference.sh`, and
+`generate_responses.py` for evaluating locally merged models through vLLM.
+The evaluation configuration follows the paper setting:
+
+- `temperature=0.0` (greedy decoding);
+- `repetition_penalty=1.0`;
+- Qwen3 non-thinking prompt construction;
+- an explicit chat-turn stop token for each backbone.
+
+The explicit stop token is required because the token used to end an assistant
+turn is not necessarily the tokenizer's ordinary EOS token:
+
+| Backbone | Assistant-turn token | Token ID |
+|---|---|---:|
+| Qwen3 | `<|im_end|>` | `151645` |
+| Llama-3.1 | `<|eot_id|>` | `128009` |
+
+Start one model server:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 PORT=8002 \
+  bash serve_vllm.sh qwen3 Kmeans 01
+```
+
+Run generation and evaluation in another shell:
+
+```bash
+PORT=8002 WORKERS=32 bash inference.sh qwen3 Kmeans 01
+```
+
+Llama-3.1 uses the corresponding model kind:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 PORT=8002 \
+  bash serve_vllm.sh llama31 Kmeans 01
+
+PORT=8002 WORKERS=32 bash inference.sh llama31 Kmeans 01
+```
+
+The generated JSONL retains the fields required by IFBench (`prompt` and
+`response`) and also records `finish_reason`, `stop_reason`, and token usage.
+A large number of `finish_reason="length"` records means generation reached
+`max_tokens`; inspect those responses for repetition or incorrect stop-token
+handling. Do not resume files generated with the old non-stopping setup unless
+they have been cleaned first.
